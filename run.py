@@ -1,4 +1,3 @@
-import json
 import os
 
 from random import choices
@@ -6,7 +5,7 @@ from datetime import datetime
 from dotenv import load_dotenv
 from flask_cors import CORS
 
-from flask import Flask, request, jsonify
+from flask import Flask, request
 import pymysql
 
 load_dotenv()
