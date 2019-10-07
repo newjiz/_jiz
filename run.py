@@ -1,4 +1,5 @@
 import os
+import logging
 
 from random import choices
 from datetime import datetime
@@ -8,8 +9,13 @@ from flask_cors import CORS
 from flask import Flask, request
 import pymysql
 
+from pymongo import MongoClient
+from bson.json_util import dumps
+from bson.objectid import ObjectId
+
 load_dotenv()
-db = None
+db, _db = None, None
+log = logging.getLogger(__name__)
 
 app = Flask(__name__)
 cors = CORS(app)
@@ -46,7 +52,9 @@ def error(message="Bad request", code=400):
 
 @app.route("/", methods=["GET"])
 def index():
-    return ok()
+    log.info(_db.list_collection_names())
+    users = [u for u in _db.users.find()]    
+    return dumps({"data": users}), 200
 
 @app.route("/u/<id>", methods=["GET"])
 def get_user(id):
@@ -169,10 +177,14 @@ def vote_content(id, c_id, vote):
     key = "up" if vote == 1 else "down"
 
     with db.cursor() as cursor:
-        cursor.execute(f"select count(id) from content where user_id = {user_id} and id = {c_id}")
+        try:
+            cursor.execute(f"select count(id) from content where user_id = {user_id} and id = {c_id}")
+        except Exception as e:
+            log.error(e)
+            return error(f"Raised exception: {e}", 400)
+
         data = cursor.fetchone()
-    db.commit()
-    
+
     if data[0] > 0:
         return error("You cannot vote urself, bastard", 400)
 
@@ -184,6 +196,83 @@ def vote_content(id, c_id, vote):
     db.commit()
     
     return {"message": "OK"}, 200
+
+@app.route("/content/<id>", methods=["get"])
+def content_get(id):
+    
+    try:
+        _id = ObjectId(str(id)) 
+        user = _db.users.find_one({"_id": _id})
+
+        if user is None:
+            return error(f"User '{id}' not found", 404)
+
+    except Exception as e:
+        log.error(e)
+        return error(f"The given id ({id}) is not valid", 400)
+
+    try:
+        content = _db.content.find_one({"user_id": _id})
+
+        if content is None:
+            return {"data": None}, 200
+
+    except Exception as e:
+        log.info(e)
+        return error(f"Raised exception: {e}", 400)
+
+    return dumps({"data": content}), 200
+
+@app.route("/content", methods=["post"])
+def content_post():
+    data = request.json
+    
+    if "user_id" not in data.keys():
+        return error("No 'user_id' key", 400)
+
+    try:
+        user = _db.users.find_one({"_id": ObjectId(data["user_id"])})
+
+        if user is None:
+            return error(f"User {data['user_id']} not found'", 404)
+
+    except Exception as e:
+        log.error(e)
+        return error(f"Raised exception: {e}", 400)
+
+    try:
+        _c = _db.content.find_one({"user_id": user["_id"]}) 
+
+        if _c is not None:
+            return error("Content already exists", 400)
+
+    except Exception as e:
+        log.error(e)
+        return error(f"Raised exception: {e}", 400)
+
+    try:
+        content = {
+            "user_id": data["user_id"],
+            "content": {
+                "data": data["content"],
+                "type": "text",
+                "url": ""
+            },
+            "created": datetime.now(),
+            "votes": {
+                "up": 0,
+                "down": 0
+            }
+        }
+
+        content_id = _db.content.insert_one(content).inserted_id
+
+    except Exception as e:
+        log.error(e)
+        return error(f"Raised exception: {e}", 400)
+
+    return {"message": f"Content uploaded: {content_id}"}, 200
+
 
 @app.route("/u/<id>/c", methods=["post"])
 def post_user_content(id):
@@ -260,5 +349,11 @@ if __name__ == "__main__":
             passwd=os.environ["PASS"],
             db=os.environ["DB"]
             ) 
+
+    mongo = MongoClient(
+        os.environ["MONGO_HOST"],
+        int(os.environ["MONGO_PORT"])
+        )
+    _db = mongo.jiz
 
     app.run(host="0.0.0.0", port=5000, debug=True)
