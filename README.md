@@ -2,6 +2,11 @@
 
 If u wanna be rich, you better vote bitch!
 
+- For pepo xd:
+```bash
+sudo mongod --dbpath ~/data/db --fork --logpath ~/data/db/log
+```
+
 ## Setup for developmet
 
 1. Use an Python env, please:
