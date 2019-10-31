@@ -105,7 +105,7 @@ def content_post():
 
     try:
         content = {
-            "user_id": data["user_id"],
+            "user_id": ObjectId(data["user_id"]),
             "content": {
                 "data": data["content"],
                 "type": "text",
