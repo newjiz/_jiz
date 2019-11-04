@@ -1,34 +1,167 @@
-import os
-import logging
-
-from random import choices
 from datetime import datetime
 from dotenv import load_dotenv
-from flask_cors import CORS
 
+from flask_cors import CORS
 from flask import Flask, request
+
+from passlib.hash import pbkdf2_sha256
 
 from pymongo import MongoClient, UpdateOne
 from bson.json_util import dumps
 from bson.objectid import ObjectId
 
 from elo import update_elo, R0
-from utils import ok, error
+
+from db_utils import *
+from utils import *
+
+from middleware import auth
+
+from config import *
 
 load_dotenv()
 db = None
-log = logging.getLogger(__name__)
+log = LOGGER
 
 app = Flask(__name__)
 cors = CORS(app)
 
 
-@app.route("/", methods=["GET"])
-def index(): 
-    return ok()
+# Open endpoints
+
+@app.route("/register", methods=["post"])
+def register():
+    """
+    Register a user.
+
+    JSON Body
+    ---------
+        username: str
+        email: str
+        password: str
+        description: str, optional
+
+    Response codes
+    --------------
+        200
+            JWT token
+
+        400
+            Bad request
+
+        403
+            Username exists
+    """
+
+    data = request.json
+
+    if "username" not in data:
+        return error(message="No 'username' given")
+
+    # Check email + if it's valid
+
+    if "email" not in data:
+        return error(message="No 'email' given")
+
+    if not valid_mail(data["email"]):
+        return error(message="Email not valid")
+
+    # Check password shit
+
+    if "password" not in data:
+        return error(message="No 'password' given")
+
+    if len(data["password"]) < 8:
+        return error(message="Password should be min. 8 char long")
+
+    description = ""
+
+    if "description" in data:
+        description = data["description"]
+    
+    # username and email fields are unique 
+    # for all users
+
+    target_1 = db.users.find_one({"username": data["username"]})
+    target_2 = db.users.find_one({"email": data["email"]})
+
+    if (target_1 is not None) or (target_2 is not None):
+        return error(message="User already exists", code=403)
+
+    hashed_pass = pbkdf2_sha256.hash(data["password"], rounds=10**6, salt_size=2**4)
+
+    new_user = {
+        "username": data["username"],
+        "email": data["email"],
+        "password": hashed_pass,
+        "description": description, 
+        "created": datetime.now()
+    }
+
+    try:
+        user_id = db.users.insert_one(new_user).inserted_id
+
+    except Exception as e:
+        log.error(e)
+        return error("Could not register new user")
+
+    data = {
+        "token": encode({"user_id": str(user_id)})
+        }
+
+    return data, 200
 
 
-@app.route("/user/<id>", methods=["GET"])
+@app.route("/login", methods=["post"])
+def login():
+    """
+    Login a user.
+
+    JSON Body
+    ---------
+        username: str
+        password: str
+
+    Response codes
+    --------------
+        200
+            JWT token
+
+        400
+            Bad request
+
+        404
+            User not found
+    """
+
+    data = request.json
+
+    if "username" not in data:
+        return error(message="No 'username' given")
+
+    if "password" not in data:
+        return error(message="No 'password' given")
+
+    if len(data["password"]) == 0:
+        return error(message="Password is empty")
+    
+    target = db.users.find_one({"username": data["username"]})
+
+    if target is None:
+        return error(message="User not found", code=404) 
+
+
+    if not pbkdf2_sha256.verify(data["password"], target["password"]):
+        return error("Could not log in")
+
+    data = {
+        "token": encode({"user_id": str(target["_id"])})
+        }
+
+    return data, 200
+
+
+@app.route("/user/<id>", methods=["get"])
 def get_user(id):
     """
     Get a users data (profile).
@@ -50,17 +183,30 @@ def get_user(id):
             If the content is not found.
     """
 
-    try:
-        user_id = ObjectId(id)
-    except Exception as e:
-        return error("{}".format(e), 400)
-    
-    _user = db.users.find_one({"_id": user_id})
-    
-    if _user is None:
-        return error("User not found", 404)        
+    user = db_get_user({"user_id": id})    
+    return dumps({"data": user}), 200
 
-    return dumps({"data": _user}), 200
+
+@app.route("/contest", methods=["get"])
+def get_contest():
+    """
+    Get current contest
+
+    Returns
+    -------
+        200
+            Current contest
+    """
+    now = datetime.now()
+
+    try:
+        contests = db.contest.find({"start": {"$lte": now}, "end": {"$gt": now}})
+
+    except Exception as e:
+        log.error(e)
+        return error()
+
+    return dumps({"data": contests})
 
 
 @app.route("/content", methods=["get"])
@@ -144,94 +290,14 @@ def get_user_content(id):
             If the user is not found.
     """
 
-    try:
-        user_id = ObjectId(id)
-    except Exception as e:
-        return error("{}".format(e), 400)
+    user = db_get_user({"user_id": id})
 
-    _c = db.content.find({"user_id": user_id})
+    _c = db.content.find({"user_id": user["_id"]})
     
     if _c is None:
         return error("Content not found", 404)
 
     return dumps({"data": _c}), 200
-
-
-@app.route("/content", methods=["post"])
-def content_post():
-    """
-    Create a content.
-
-    JSON body
-    ---------
-        user_id: str
-            The id of the user.
-
-        content: str
-            The content text
-
-    Response codes
-    --------------
-        200
-            The content created.
-
-        400
-            Bad request.
-
-        404
-            If the user is not found.
-    """
-
-    data = request.json
-    
-    if "user_id" not in data.keys():
-        return error("No 'user_id' key", 400)
-
-    try:
-        user = db.users.find_one({"_id": ObjectId(data["user_id"])})
-
-        if user is None:
-            return error(f"User {data['user_id']} not found'", 404)
-
-    except Exception as e:
-        log.error(e)
-        return error(f"Raised exception: {e}", 400)
-
-    try:
-        _c = db.content.find_one({"user_id": user["_id"]}) 
-
-        if _c is not None:
-            return error("Content already exists", 400)
-
-    except Exception as e:
-        log.error(e)
-        return error(f"Raised exception: {e}", 400)
-
-    try:
-        content = {
-            "user_id": ObjectId(data["user_id"]),
-            "content": {
-                "data": data["content"],
-                "type": "text",
-                "url": ""
-            },
-            "created": datetime.now(),
-            "votes": {
-                "total": 0,
-                "up": 0,
-                "down": 0,
-                "elo": R0
-            }
-        }
-
-        content_id = db.content.insert_one(content).inserted_id
-
-    except Exception as e:
-        log.error(e)
-        return error(f"Raised exception: {e}", 400)
-
-    return {"message": f"Content uploaded: {content_id}"}, 200
-
 
 @app.route("/ranking", methods=["get"])
 def ranking():
@@ -267,6 +333,9 @@ def ranking2():
             {
                 "$project": {
                     "_id": 1,
+                    "user_id": 1,
+                    "created": 1,
+                    "content": 1,
                     "score_p": {
                         "$divide": [
                             "$votes.up",
@@ -284,16 +353,108 @@ def ranking2():
     return dumps({"data": [r for r in ranking]}), 200
 
 
+# Auth endpoints
 
-@app.route("/stack/<id>", methods=["get"])
-def get_user_stack(id):
+@app.route("/", methods=["get"])
+@auth
+def index():
+    user = db_get_user(request.jwt_data)
+    content = db.content.find({"user_id": user["_id"]})
+
+    return dumps({"data": {"user": user, "content": content}})
+
+
+@app.route("/content", methods=["post"])
+@auth
+def content_post():
+    """
+    Create a content.
+
+    Headers
+    -------
+        Authorization: str
+            Users JWT token
+
+    JSON body
+    ---------
+        contest_id: str
+            Optional. The id of the contest.
+
+        content: str
+            The content text
+
+    Response codes
+    --------------
+        200
+            The content created.
+
+        400
+            Bad request.
+
+        404
+            If the user is not found.
+    """
+
+    data = request.json    
+    user = db_get_user(request.jwt_data)
+
+    if "contest_id" not in data:
+        contest = db.contest.find_one({"current": True})
+        # return error(message="No 'contest_id' given")
+
+    else:
+        contest = db.contest.find_one({"_id": ObjectId(data["contest_id"])})
+
+    if contest is None:
+        return error(message="Contest not found", code=404)
+
+    try:
+        _c = db.content.find_one({"user_id": user["_id"], "contest_id": contest["_id"]}) 
+
+        if _c is not None:
+            return error("Content already exists", 400)
+
+    except Exception as e:
+        log.error(e)
+        return error(f"Raised exception: {e}", 400)
+
+    try:
+        content = {
+            "user_id": user["_id"],
+            "content": {
+                "data": data["content"],
+                "type": "text",
+                "url": ""
+            },
+            "contest_id": contest["_id"],
+            "created": datetime.now(),
+            "votes": {
+                "total": 0,
+                "up": 0,
+                "down": 0,
+                "elo": R0
+            }
+        }
+
+        content_id = db.content.insert_one(content).inserted_id
+
+    except Exception as e:
+        log.error(e)
+        return error(f"Raised exception: {e}", 400)
+
+    return {"message": f"Content uploaded", "content_id": str(content_id)}, 200
+
+
+@app.route("/stack", methods=["get"])
+@auth
+def get_user_stack():
     """
     Get a users stack.
 
-    Url parameters
-    --------------
-        id: str
-            The id of the user.
+    Headers
+    -------
+        Authorization: str
+            JWT totken of the user.
 
     Response code
     -------------
@@ -307,18 +468,10 @@ def get_user_stack(id):
             If the user is not found.
     """
 
-    try:
-        user_id = ObjectId(id)
-    except Exception as e:
-        return error("{}".format(e), 400)
-
-    user = db.user.find({"_id": user_id})
-    
-    if user is None:
-        return error("User not found", 404)
+    user = db_get_user(request.jwt_data)
 
     content = db.content.aggregate([
-            {"$match": {"user_id": {"$ne": user_id}}},
+            {"$match": {"user_id": {"$ne": user["_id"]}}},
             {"$sample": {"size": 2}}
         ])
 
@@ -326,15 +479,18 @@ def get_user_stack(id):
 
 
 @app.route("/vote", methods=["post"])
+@auth
 def vote_content():
     """
     Vote a content.
 
-    Url parameters
-    --------------
-        id: str
-            The id of the user.
+    Headers
+    -------
+        Authorization: str
+            JWT totken of the user.
 
+    JSON Body
+    ---------
         w: str
             The id of the selected content (winner).
 
@@ -357,20 +513,7 @@ def vote_content():
     """
 
     data = request.json
-    
-    if "user_id" not in data.keys():
-        return error("No 'user_id' key", 400)
-
-    try:
-        user = db.users.find_one({"_id": ObjectId(data["user_id"])})
-
-        if user is None:
-            return error(f"User {data['user_id']} not found'", 404)
-
-    except Exception as e:
-        log.error(e)
-        return error(f"Raised exception: {e}", 400)
-
+    user = db_get_user(request.jwt_data)
 
     if "win" not in data.keys():
         return error("No 'win' key", 400)
@@ -418,10 +561,5 @@ def vote_content():
 
 
 if __name__ == "__main__":
-    mongo = MongoClient(
-        os.environ["MONGO_HOST"],
-        int(os.environ["MONGO_PORT"])
-        )
-    
-    db = mongo.jiz
-    app.run(host="0.0.0.0", port=5000, debug=True)
+    db = DB
+    app.run(host=HOST, port=PORT, debug=DEBUG)
