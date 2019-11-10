@@ -267,6 +267,40 @@ def content_get(id):
 
     return dumps({"data": content}), 200
 
+@app.route("/content/contest/<id>", methods=["get"])
+def get_contest_content(id):
+    """
+    Get a content by contest id.
+
+    Path parameters
+    ---------------
+        id: str
+            The id of the contest.
+
+    Response codes
+    --------------
+        200
+            The content.
+
+        400
+            If the id is not valid.
+
+        404
+            If the content is not found.
+    """
+
+    try:
+        _id = ObjectId(id)
+    except Exception as e:
+        return error(f"Raised exception: {e}", 400)
+
+    content = db.content.find_one({"contest_id": _id})
+
+    if content is None:
+        return error("Content not found", 404)
+
+    return dumps({"data": content}), 200
+
 
 @app.route("/content/user/<id>", methods=["get"])
 def get_user_content(id):
@@ -554,6 +588,13 @@ def vote_content():
             UpdateOne(query_win[0], query_win[1]),
             UpdateOne(query_los[0], query_los[1])
         ])
+
+    db.votes.insert_one({
+        "user": user["_id"],
+        "win": win["_id"],
+        "los": los["_id"],
+        "created": datetime.now() 
+    })
 
     log.info(update.bulk_api_result)
 
