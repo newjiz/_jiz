@@ -200,13 +200,18 @@ def get_contest():
     now = datetime.now()
 
     try:
-        contests = db.contest.find({"start": {"$lte": now}, "end": {"$gt": now}})
+        # contest = db.contest.find_one({"start": {"$lte": now}, "end": {"$gt": now}})
+        contest = db.contest.find_one({"current": True})
 
     except Exception as e:
         log.error(e)
         return error()
 
-    return dumps({"data": contests})
+    duration = contest["end"].timestamp() - contest["start"].timestamp()
+    now = datetime.now().timestamp() - contest["start"].timestamp()
+    contest["progress"] = now / duration
+
+    return dumps({"data": contest})
 
 
 @app.route("/content", methods=["get"])
@@ -346,7 +351,13 @@ def ranking():
 
     ranking = db.content.find().sort("votes.elo", -1)
 
-    return dumps({"data": [r for r in ranking]}), 200
+    data, pos = [], 1
+    for r in ranking:
+        data.append(r)
+        data[pos-1]["position"] = pos
+        pos += 1     
+
+    return dumps({"data": data}), 200
 
 
 @app.route("/ranking2", methods=["get"])
@@ -393,7 +404,11 @@ def ranking2():
 @auth
 def index():
     user = db_get_user(request.jwt_data)
-    content = db.content.find({"user_id": user["_id"]})
+
+    try:
+        content = db.content.find({"user_id": user["_id"]})
+    except Exception:
+        return error(message="User not found", code=404)
 
     return dumps({"data": {"user": user, "content": content}})
 

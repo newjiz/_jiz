@@ -7,7 +7,7 @@ def auth(f):
     @wraps(f)
     def decorated_function(*args, **kwargs):
         if "AUTHORIZATION" not in request.headers:
-            return error("No authorization", 401)
+            return error(message="No authorization", code=401)
 
         token = request.headers["AUTHORIZATION"]
 
